@@ -89,6 +89,24 @@ export async function promiseAllInBatches<T, B>(task : (item : T) => Promise<B>|
     return results;
 }
 
+export const batchPromises = async <PromiseParamType, PromiseReturnType>(
+  params: PromiseParamType[],
+  makePromise: (param: PromiseParamType) => Promise<PromiseReturnType>,
+  batchSize: number
+): Promise<PromiseSettledResult<PromiseReturnType>[]> => {
+  const results: PromiseSettledResult<PromiseReturnType>[] = []
+  const remainingParams = [...params]
+
+  while (remainingParams.length > 0) {
+    const batchParams = remainingParams.splice(0, batchSize)
+    const promises = batchParams.map(makePromise)
+    const batchResults = await Promise.allSettled(promises)
+    results.push(...batchResults)
+  }
+  return results
+}
+
+
 export function roundDigits(num : number, scale : number) : number {
   if(!("" + num).includes("e")) {
     return +(Math.round(parseFloat(num + "e+" + scale))  + "e-" + scale);

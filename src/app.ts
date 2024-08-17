@@ -5,7 +5,7 @@ import * as $ from "jquery";
 import { throttle, debounce } from 'throttle-debounce';
 import * as  L from "leaflet";
 import "leaflet-providers";
-import {format, promiseAllInBatches} from "./helpers";
+import {batchPromises, format, promiseAllInBatches} from "./helpers";
 
 import * as Comlink from 'comlink';
 import {
@@ -65,6 +65,11 @@ export default class App {
   inputs: AppInputs = {};
   imagesLoaded : ImageLocation[] = []
   defaultSizes : string[] = [
+    '131072 x 131072',
+    '65536 x 65536',
+    '32768 x 32768',
+    '16384 x 16384',
+    '8192 x 8192',
     '8129 x 8129',
     '4033 x 4033',
     '2017 x 2017',
@@ -332,7 +337,7 @@ export default class App {
       placeholder: 'Output Zoom Level',
       type: 'number',
       min: '1',
-      max: '18',
+      max: '19',
       step: '1',
       value: '13'
     });
@@ -554,7 +559,6 @@ export default class App {
   }
   doDisEnableControls() {
     const outputZoomLevel = parseInt(this.inputs.outputzoom.val().toString());
-    console.log(outputZoomLevel, outputZoomLevel > 15);
     if (outputZoomLevel > 15) {
       this.els.generate.prop('disabled', true);
       this.els.generate.prop('title', 'Cannot generate heightmap for output zoom > 15');
@@ -647,7 +651,6 @@ export default class App {
     window.addEventListener('paste', (event : ClipboardEvent) => {
       // @ts-ignore
       let paste = (event.clipboardData || window.clipboardData).getData("text");
-      console.log(event, paste);
       if (paste) {
         if (this.isPasteableText(paste)) {
           const latLng = this.getLatLngFromText(paste);
@@ -882,7 +885,6 @@ export default class App {
   }
   getApproxHeightsForState() {
     const outputZoomLevel = parseInt(this.inputs.outputzoom.val().toString());
-    console.log(outputZoomLevel, outputZoomLevel > 15);
     if (outputZoomLevel > 15) {
        this.els.generatorInfo.find('.heights').text('');
        return;
@@ -988,7 +990,7 @@ export default class App {
     this.els.generateAlbedo.text('Generating');
     const state = this.getCurrentState();
     this.resetOutput();
-    const imageFetches = [];
+    
     const items : (ConfigState & TileCoords & {url: string})[] = [];
 
     const oldZoom = parseInt(this.inputs.zoom.val().toString());
@@ -1006,7 +1008,6 @@ export default class App {
           items.push({...state, ...coords, url: url});
         }
       }
-      console.log(items);
       this.combineUrlsAndDownload(items)
       .finally(() => {
         this.inputs.zoom.val(oldZoom);
@@ -1016,71 +1017,42 @@ export default class App {
       });
     }, 1000);
   }
-  async combineImagesSimple(states : (ConfigState & TileCoords & {url: string})[]) : Promise<void|ImageData> {
+  async combineImagesSimple(items : (ConfigState & TileCoords & {url: string})[], startX: number, startY: number) : Promise<void|ImageData> {
     const tileWidth = 256;
-    const increment = 1/tileWidth;
 
-    const extent = {
-      x1: states[0].exactPos.x - states[0].widthInTiles/2,
-      x2: states[0].exactPos.x + states[0].widthInTiles/2,
-      y1: states[0].exactPos.y - states[0].heightInTiles/2,
-      y2: states[0].exactPos.y + states[0].heightInTiles/2
-    }
 
-    const map : Record<number, Record<number, (ConfigState & TileCoords & {url: string})>> = {};
     let total = 0;
-    for (let tile of states) {
-      if (!map[tile.x]) {
-        map[tile.x] = {};
-      }
-      map[tile.x][tile.y] = tile;
-      total++;
-    }
-
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext("2d");
-    canvas.width  = states[0].width;
-    canvas.height = states[0].height;
-
-    const promises = [];
+    canvas.width  = items[0].width;
+    canvas.height = items[0].height;
 
     let i = 0;
-    for (let y = extent.y1; y < extent.y2+1; y ++) {
-      for (let x = extent.x1; x < extent.x2+1; x ++) {
-        const tile = {
-          x: Math.floor(x),
-          y: Math.floor(y)
+    const drawTile = (tile: (ConfigState & TileCoords & {url: string})) => new Promise<void>((resolve, reject) => {
+      let img = new Image();
+      img.crossOrigin = "Anonymous";
+      img.onload = () => {
+        this.els.generateAlbedo.text(`Downloaded ${i++}/${total}`);
+        const drawAt = {
+          x: Math.floor((tile.x - startX) * tileWidth),
+          y: Math.floor((tile.y - startY) * tileWidth)
         };
-        const px = {
-          x: Math.floor((x%1)*tileWidth),
-          y: Math.floor((y%1)*tileWidth)
-        };
-        if (typeof map[tile.x] === 'undefined') {
-          console.error("Did not have map tile row", map[tile.x], tile.x, map);
-        }
-        const tileOb = map[tile.x][tile.y];
-        promises.push(new Promise<void>((resolve, reject) => {
-          let img = new Image();
-          img.crossOrigin = "Anonymous";
-          img.onload = () => {
-            this.els.generateAlbedo.text(`Downloaded ${i++}/${total}`);
-            const drawAt = {
-              x: Math.floor((tile.x - extent.x1) * tileWidth),
-              y: Math.floor((tile.y - extent.y1) * tileWidth)
-            };
-            ctx.drawImage(
-              img,
-              drawAt.x,
-              drawAt.y
-            );
-            resolve();
-          };
-          img.onerror = reject;
-          img.src = tileOb.url;
-        }));
-      }
-    }
-    return Promise.all(promises)
+        ctx.drawImage(
+          img,
+          drawAt.x,
+          drawAt.y
+        );
+        resolve();
+      };
+      img.onerror = reject;
+      img.src = tile.url;
+    })
+
+    return batchPromises<(ConfigState & TileCoords & {url: string}), void>(
+      items,
+      drawTile,
+      128
+    )
     .then(r => {
       this.els.generateAlbedo.text(`Getting Image Data`);
       return ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -1088,14 +1060,58 @@ export default class App {
       console.error(e);
     });
   }
-  async combineUrlsAndDownload(items : (ConfigState  & TileCoords & {url: string})[]) {
-    //@ts-ignore
-    const output = await this.combineImagesSimple(items);
-    if (output) {
-      return this.saveOutputAlbedo(output, items);
+  async combineUrlsAndDownload(items : (ConfigState & TileCoords & {url: string})[]) {
+    const maxCanvasSize = 2048;
+    const tileSize = 256
+
+    const skipX = 0
+
+    const {height, width, startx, starty} = items[0];
+ 
+    if (height > maxCanvasSize || width > maxCanvasSize) {
+      const heightSplit = height / maxCanvasSize
+      const widthSplit = width / maxCanvasSize
+
+      const map: Record<number, Record<number, (ConfigState & TileCoords & {url: string})[]>> = {}
+ 
+      for (let x = skipX; x < Math.ceil(widthSplit); x++) {
+        map[x] = {}
+        for (let y = 0; y < Math.ceil(heightSplit); y++) {
+          const startX = startx + x * (maxCanvasSize / tileSize);
+          const startY = starty + y * (maxCanvasSize / tileSize);
+          const nextStartX = startx + (x + 1) * (maxCanvasSize / tileSize);
+          const nextStartY = starty + (y + 1) * (maxCanvasSize / tileSize);
+          map[x][y] = []
+
+          items.forEach((item) => {
+            if ( item.x >= startX && item.x < nextStartX && item.y >= startY && item.y < nextStartY ){
+              map[x][y].push({...item, height: maxCanvasSize, width: maxCanvasSize})
+            }
+          })
+        }
+      }
+
+      
+      for (let x = skipX; x < Math.ceil(widthSplit); x++) {
+        for (let y = 0; y < Math.ceil(heightSplit); y++) {
+          const startX = startx + x * (maxCanvasSize / tileSize);
+          const startY = starty + y * (maxCanvasSize / tileSize);
+          const output = await this.combineImagesSimple(map[x][y], startX, startY);
+          if (output) {
+            this.saveOutputAlbedo(output, map[x][y], x, y);
+          }
+        }
+      }
+    } else {
+      const output = await this.combineImagesSimple(items, startx, starty);
+      if (output) {
+        this.saveOutputAlbedo(output, items, 0, 0);
+      }
+
     }
+
   }
-  async saveOutputAlbedo(output : ImageData, states : ConfigState[]) {
+  async saveOutputAlbedo(output : ImageData, states : ConfigState[], x?: number, y?: number) {
     const s = states[0];
     const formatArgs = {
       lat: s.latitude.toFixed(3).toString().replace(".",'_'),
@@ -1104,8 +1120,10 @@ export default class App {
       w: s.width,
       h: s.height,
       layer: this.layer,
+      x,
+      y
     };
-    const fn = format('{lat}_{lng}_{zoom}_{w}_{h}_albedo_{layer}.png', formatArgs);
+    const fn = format('{lat}_{lng}_{zoom}_{w}_{h}_albedo_{layer}_{x}_{y}.png', formatArgs);
 
     //@ts-ignore
     const result = UPNG.encode([output.data.buffer], states[0].width, states[0].height, null);
@@ -1176,7 +1194,7 @@ export default class App {
       lat: s.latitude.toFixed(3).toString().replace(".",'_'),
       lng: s.longitude.toFixed(3).toString().replace(".",'_'),
       zoom: s.zoom,
-      w: s.width,
+      w: s.width, 
       h: s.height,
     };
     const fn = format('{lat}_{lng}_{zoom}_{w}_{h}.png', formatArgs);
